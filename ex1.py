@@ -17,9 +17,9 @@ def get_args():
     parser.add_argument('--lr', type=float, default=2e-5, help='Learning rate')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--do_train', action='store_true')
-    parser.add_argument('--dp_predict', action='store_true')
+    parser.add_argument('--do_predict', action='store_true')
     parser.add_argument('--model_path', type=str, default=None)
-    args = parser.parse_args()
+    args = vars(parser.parse_args())
     return args
 
 def tokenize_function(examples):
@@ -50,32 +50,10 @@ validation_set = dataset['validation']
 validation_set = validation_set.select (args['max_eval_samples']) if args['max_eval_samples'] > -1 else validation_set
 test_set = dataset['test']
 test_set = test_set.select (args['max_test_samples']) if args['max_test_samples'] > -1 else test_set
-dataset = {
-    'train': train_set,
-    'validation': validation_set,
-    'test': test_set
-}
 
 # Load the tokenizer and model
 model_name = "bert-base-uncased"
 tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-
-#tokenize the dataset
-
-tokenized_datasets = dataset.map(tokenize_function, batched=True)
-
-
-
-# Limit number of training, evaluation, and test samples according to the values past in args
-train_samples = args.get('max_train_samples', None)
-if train_samples is not None:
-    tokenized_datasets["train"] = tokenized_datasets["train"].shuffle(seed=42).select(range(train_samples))
-eval_samples = args.get('max_eval_samples', None)
-if eval_samples is not None:
-    tokenized_datasets["validation"] = tokenized_datasets["validation"].shuffle(seed=42).select(range(eval_samples))
-test_samples = args.get('max_test_samples', None)
-if test_samples is not None:
-    tokenized_datasets["test"] = tokenized_datasets["test"].shuffle(seed=42).select(range(test_samples))
 
 # Define the compute_metrics function
 accuracy = evaluate.load("accuracy")
@@ -84,8 +62,9 @@ if args['do_train']:
     # Initialize wandb
     wandb.init(project="mrpc-paraphrase-detection", config=args)
 
-    tokenized_train_set = tokenized_datasets['train']
-    tokenized_validation_set = tokenized_datasets['validation']
+
+    tokenized_train_set = train_set.map(tokenize_function, batched=True)
+    tokenized_validation_set = validation_set.map(tokenize_function, batched=True)
 
     # Load the model
     model = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
@@ -113,7 +92,7 @@ if args['do_train']:
         eval_dataset=tokenized_validation_set,
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
-        datacollator=DataCollatorWithPadding(tokenizer, padding=True, max_length=512),
+        data_collator=DataCollatorWithPadding(tokenizer),
     )
 
     # Train the model
@@ -128,22 +107,22 @@ if args['do_train']:
     with open ('res.txt', 'a') as f:
         f.write(f'epochs: {args["num_train_epochs"]}, lr: {args["lr"]}, batch_size: {args["batch_size"]}, eval_acc: {eval_accuracy}\n')
 
-    with open ('predictions_on_validation.txt', 'w') as f:
+    with open (f'predictions_on_validation_of_epoch_num_{args["num_train_epochs"]}_lr_{args["lr"]}_batch_size_{args["batch_size"]}.txt', 'w') as f:
         for i, pred in enumerate(tokenized_validation_set):
             sentence1 = tokenized_validation_set[i]["sentence1"]
             sentence2 = tokenized_validation_set[i]["sentence2"]
             f.write(f"{sentence1}###{sentence2}###{pred['label']}\n")
-            
+
     # Save the model
     trainer.save_model(f'epoch_num_{args["num_train_epochs"]}_lr_{args["lr"]}_batch_size_{args["batch_size"]}')
     
     wandb.finish()
 
 # define evaluation arguments
-if args['dp_predict']:
+if args['do_predict']:
 
     # Tokenize the dataset
-    tokenized_test_set = dataset['test'].map(tokenize_function, batched=True)
+    tokenized_test_set = test_set.map(tokenize_function, batched=True)
 
     max_val_acc = 0
     max_test_acc = 0
@@ -162,7 +141,7 @@ if args['dp_predict']:
             model_path = f'epoch_num_{epochs}_lr_{lr}_batch_size_{batch_size}'
             
             # Load the model
-            model = AutoModelForSequenceClassification.from_pretrained(best_model_path, num_labels=2)
+            model = AutoModelForSequenceClassification.from_pretrained(model_path, num_labels=2)
             # Load the tokenizer
             tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
             model.eval()
@@ -183,14 +162,13 @@ if args['dp_predict']:
     else:
         print('different')
 
+    best_model = AutoModelForSequenceClassification.from_pretrained(best_model_path, num_labels=2)
+    trainer = Trainer(model=best_model, tokenizer=tokenizer)
+    predictions = trainer.predict(tokenized_test_set)
+    preds = np.argmax(predictions.predictions, axis=-1)
+
     with open('predictions.txt', 'w') as f:
-        for i, pred in preds:
+        for i, pred in enumerate(preds):
             sentence1 = test_set[i]["sentence1"]
             sentence2 = test_set[i]["sentence2"]
             f.write(f"{sentence1}###{sentence2}###{preds[i]}\n")
-
-
-
-
-
-
